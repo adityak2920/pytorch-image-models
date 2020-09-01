@@ -1,9 +1,14 @@
+""" EfficientNet, MobileNetV3, etc Blocks
+
+Hacked together by / Copyright 2020 Ross Wightman
+"""
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from .layers.activations import sigmoid
-from .layers import create_conv2d, drop_path
 
+from .layers import create_conv2d, drop_path, get_act_layer
+from .layers.activations import sigmoid
 
 # Defaults used for Google/Tensorflow training of mobile networks /w RMSprop as per
 # papers and TF reference implementations. PT momentum equiv for TF decay is (1 - TF decay)
@@ -50,6 +55,13 @@ def resolve_se_args(kwargs, in_chs, act_layer=None):
         assert act_layer is not None
         se_kwargs['act_layer'] = act_layer
     return se_kwargs
+
+
+def resolve_act_layer(kwargs, default='relu'):
+    act_layer = kwargs.pop('act_layer', default)
+    if isinstance(act_layer, str):
+        act_layer = get_act_layer(act_layer)
+    return act_layer
 
 
 def make_divisible(v, divisor=8, min_value=None):
@@ -121,10 +133,9 @@ class ConvBnAct(nn.Module):
         self.act1 = act_layer(inplace=True)
 
     def feature_info(self, location):
-        if location == 'expansion' or location == 'depthwise':
-            # no expansion or depthwise this block, use act after conv
+        if location == 'expansion':  # output of conv after act, same as block coutput
             info = dict(module='act1', hook_type='forward', num_chs=self.conv.out_channels)
-        else:  # location == 'bottleneck'
+        else:  # location == 'bottleneck', block output
             info = dict(module='', hook_type='', num_chs=self.conv.out_channels)
         return info
 
@@ -168,12 +179,9 @@ class DepthwiseSeparableConv(nn.Module):
         self.act2 = act_layer(inplace=True) if self.has_pw_act else nn.Identity()
 
     def feature_info(self, location):
-        if location == 'expansion':
-            # no expansion in this block, use depthwise, before SE
-            info = dict(module='act1', hook_type='forward', num_chs=self.conv_pw.in_channels)
-        elif location == 'depthwise':  # after SE
+        if location == 'expansion':  # after SE, input to PW
             info = dict(module='conv_pw', hook_type='forward_pre', num_chs=self.conv_pw.in_channels)
-        else:  # location == 'bottleneck'
+        else:  # location == 'bottleneck', block output
             info = dict(module='', hook_type='', num_chs=self.conv_pw.out_channels)
         return info
 
@@ -238,11 +246,9 @@ class InvertedResidual(nn.Module):
         self.bn3 = norm_layer(out_chs, **norm_kwargs)
 
     def feature_info(self, location):
-        if location == 'expansion':
-            info = dict(module='act1', hook_type='forward', num_chs=self.conv_pw.in_channels)
-        elif location == 'depthwise':  # after SE
+        if location == 'expansion':  # after SE, input to PWL
             info = dict(module='conv_pwl', hook_type='forward_pre', num_chs=self.conv_pwl.in_channels)
-        else:  # location == 'bottleneck'
+        else:  # location == 'bottleneck', block output
             info = dict(module='', hook_type='', num_chs=self.conv_pwl.out_channels)
         return info
 
@@ -363,12 +369,9 @@ class EdgeResidual(nn.Module):
         self.bn2 = norm_layer(out_chs, **norm_kwargs)
 
     def feature_info(self, location):
-        if location == 'expansion':
-            info = dict(module='act1', hook_type='forward', num_chs=self.conv_exp.out_channels)
-        elif location == 'depthwise':
-            # there is no depthwise, take after SE, before PWL
+        if location == 'expansion':  # after SE, before PWL
             info = dict(module='conv_pwl', hook_type='forward_pre', num_chs=self.conv_pwl.in_channels)
-        else:  # location == 'bottleneck'
+        else:  # location == 'bottleneck', block output
             info = dict(module='', hook_type='', num_chs=self.conv_pwl.out_channels)
         return info
 
